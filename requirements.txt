@@ -1,0 +1,11 @@
+# Video Learner Wiki 依赖
+
+# 核心依赖
+yt-dlp>=2023.0.0
+dashscope>=1.0.0
+python-dotenv>=1.0.0
+requests>=2.28.0
+openai>=1.0.0
+
+# 可选依赖
+# ffmpeg-python>=0.2.0  # 音频处理

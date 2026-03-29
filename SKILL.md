@@ -107,7 +107,7 @@ grep -E 'FEISHU_SPACE_ID|FEISHU_PARENT_TOKEN' ~/.openclaw/workspace-video-learne
 |------|----------|----------|
 | **B站** | `bilibili.com/video/` | cookies文件 |
 | **YouTube** | `youtube.com/watch` | cookies + deno(推荐) |
-| **抖音** | `v.douyin.com` | 无 |
+| **抖音** | `v.douyin.com` | cookies 文件（f2 库） |
 
 ## ASR 技术细节
 
@@ -127,4 +127,43 @@ GLM_API_KEY=xxx              # 智谱GLM（笔记生成）
 ALIYUN_ASR_API_KEY=xxx       # 阿里云ASR（转录）
 FEISHU_SPACE_ID=xxx          # 飞书空间ID
 FEISHU_PARENT_TOKEN=xxx      # Wiki父节点Token
+DOUYIN_COOKIES_PATH=xxx      # 抖音cookies文件路径
 ```
+
+## 抖音下载方案（f2 库）
+
+yt-dlp 对抖音支持不稳定，改用 **f2** 库（TikTokDownload 的核心引擎）：
+
+- **仓库**：https://github.com/Johnserf-Seed/TikTokDownload
+- **安装**：`pip install f2`（已安装在系统 Python）
+- **已克隆到**：`~/.openclaw/workspace-video-learner/tools/TikTokDownload/`
+
+### 下载命令
+
+```bash
+# 1. 将 Netscape cookies 转为纯文本格式
+python3 -c "
+import http.cookiejar, os
+cj = http.cookiejar.MozillaCookieJar()
+cj.load(os.environ.get('DOUYIN_COOKIES_PATH', '~/.openclaw/workspace-video-learner/cookies/douyin_cookies.txt'))
+cookie_str = '; '.join(f'{c.name}={c.value}' for c in cj)
+print(cookie_str)
+" > /tmp/douyin_cookie.txt
+
+# 2. 使用 f2 下载单个视频
+DOUYIN_COOKIE=$(cat /tmp/douyin_cookie.txt)
+python3 -m f2 dy -u "https://www.douyin.com/video/VIDEO_ID" \
+  -k "$DOUYIN_COOKIE" \
+  -p /tmp/douyin_output \
+  -M one --languages zh_CN
+
+# 3. 输出文件路径
+# /tmp/douyin_output/douyin/one/<作者名>/<日期_标题_video.mp4>
+```
+
+### 注意事项
+
+- ⚠️ Cookies 有效期约 2-4 周，过期后需要重新从浏览器导出
+- ⚠️ Bark 通知报错可忽略（未配置通知 key）
+- ⚠️ f2 依赖 pydantic 2.9.2，可能与 mcp 的 pydantic 版本冲突（不影响运行）
+- ✅ 支持：单个作品、主页作品、点赞、收藏、合集、直播

@@ -1,0 +1,23 @@
+{
+  "priority": ["aliyun", "whisper"],
+  "aliyun": {
+    "enabled": true,
+    "api_key_env": "ALIYUN_ASR_API_KEY",
+    "default_api_key": "sk-601abb31fe354b6daf24067c7a56adc6",
+    "model": "fun-asr-mtl",
+    "chunk_seconds": 540,
+    "language": "zh",
+    "description": "阿里云百炼 Transcription API - 使用 fun-asr-mtl 模型，需要 API Key"
+  },
+  "whisper": {
+    "enabled": true,
+    "model": "small",
+    "language": "Chinese",
+    "description": "OpenAI Whisper 本地模型 - 免费，但速度较慢"
+  },
+  "notes": [
+    "优先级：阿里云 ASR > Whisper",
+    "阿里云 ASR 需要有效的 API Key",
+    "Whisper 是本地模型，无需网络"
+  ]
+}

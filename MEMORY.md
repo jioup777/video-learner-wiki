@@ -38,3 +38,9 @@
 - 飞书Docx API: 写入块用`/docx/v1/documents/{id}/blocks/{id}/children`，必须含block_id
 - 飞书block_type: 3=H1,4=H2,5=H3...2=text; bullet/code/quote/divider不支持API创建，降级为text块
 - `.env`文件需要`set -a && source .env && set +a`才能export到子进程
+- feishu_uploader代码块内容必须分块写入（每块≤5000字符），不能截断，否则完整转录内容丢失
+- **SSL修复(2026-04-01)**: Python requests默认SSL与DashScope不兼容，需monkey-patch SECLEVEL=1
+- **网盘中转方案(2026-04-01)**: litterbox.catbox.moe中转大文件，绕过服务器上行带宽不足问题
+  - ✅ litterbox.catbox.moe 可用（阿里云可访问），❌ catbox.moe 被屏蔽
+  - 阿里云ASR支持最长12h/2GB文件，无需分段
+  - 上传litterbox后拿公开URL直接提交ASR，阿里云从公网下载（快）

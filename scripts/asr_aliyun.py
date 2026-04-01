@@ -18,6 +18,38 @@ try:
 except ImportError:
     DASHSCOPE_AVAILABLE = False
 
+# Fix SSL issue with DashScope (SECLEVEL compatibility)
+import requests as _requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.ssl_ import create_urllib3_context
+
+class _TLSAdapter(HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        ctx = create_urllib3_context()
+        ctx.set_ciphers('DEFAULT@SECLEVEL=1')
+        kwargs['ssl_context'] = ctx
+        return super().init_poolmanager(*args, **kwargs)
+
+_monkey_session = _requests.Session()
+_monkey_session.mount('https://', _TLSAdapter())
+# Monkey-patch requests to use TLS adapter for DashScope
+_orig_post = _requests.post
+_orig_get = _requests.get
+_orig_request = _requests.Session.request
+
+def _patched_post(url, *args, **kwargs):
+    if 'dashscope.aliyuncs.com' in str(url):
+        return _monkey_session.post(url, *args, **kwargs)
+    return _orig_post(url, *args, **kwargs)
+
+def _patched_get(url, *args, **kwargs):
+    if 'dashscope.aliyuncs.com' in str(url):
+        return _monkey_session.get(url, *args, **kwargs)
+    return _orig_get(url, *args, **kwargs)
+
+_requests.post = _patched_post
+_requests.get = _patched_get
+
 
 class AliyunASR:
     MODEL = "fun-asr-mtl"
@@ -76,46 +108,157 @@ class AliyunASR:
         LARGE_FILE_THRESHOLD_MB = 5  # 5MB 阈值
         
         if file_size_mb > LARGE_FILE_THRESHOLD_MB:
-            print(f"  [ASR] 大文件检测：{file_size_mb:.1f}MB > {LARGE_FILE_THRESHOLD_MB}MB，启用分段处理")
-            return self._transcribe_with_segments(audio_file, file_size_mb, language)
+            print(f"  [ASR] 大文件检测：{file_size_mb:.1f}MB > {LARGE_FILE_THRESHOLD_MB}MB，启用网盘中转")
+            return self._transcribe_via_relay(audio_file, file_size_mb, language)
         
-        # 小文件也先压缩到 8kHz mono 再处理，减小体积
-        converted_file = self._ensure_wav_format(audio_file)
-        return self._transcribe_with_upload(converted_file)
+        # 小文件直接上传到 DashScope
+        return self._transcribe_with_upload(audio_file)
     
-    def _transcribe_with_segments(self, audio_file: str, file_size_mb: float, language: str = "zh") -> str:
-        """大文件分段处理"""
+    def _upload_to_litterbox(self, audio_file: str, validity: str = "72h") -> str:
+        """上传文件到 litterbox.catbox.moe 并返回公开 URL
+        
+        Args:
+            audio_file: 文件路径
+            validity: 有效期 (1h/12h/24h/72h)
+            
+        Returns:
+            公开访问 URL
+        """
         import subprocess
         import tempfile
         
-        print(f"  [ASR] 压缩音频以加速上传...")
-        compressed = self._compress_audio(audio_file)
-        print(f"  [ASR] 音频压缩：{file_size_mb:.1f}MB -> {os.path.getsize(compressed)/1024/1024:.1f}MB (8kHz mono)")
+        print(f"  [中转] 上传到 litterbox.catbox.moe (有效期: {validity})...")
+        print(f"  [中转] 文件大小: {os.path.getsize(audio_file)/1024/1024:.1f} MB")
+        print(f"  [中转] 预计上传时间: {os.path.getsize(audio_file)/1024/60:.0f} 分钟（上行带宽较低）")
         
-        # 分段（每段 9 分钟，留余量）
-        segment_duration = 540  # 9 分钟
-        segments = self._split_audio(compressed, segment_duration)
-        print(f"  [ASR] 音频已分段为 {len(segments)} 段")
+        # 用临时文件存储上传结果
+        result_file = tempfile.mktemp(suffix='.litterbox')
         
-        all_texts = []
-        for i, seg in enumerate(segments, 1):
-            print(f"  [ASR] 处理分段 {i}/{len(segments)}")
-            text = self._transcribe_segment(seg)
-            if text:
-                all_texts.append(text)
-            # 清理临时文件
+        # 后台运行 curl 上传
+        proc = subprocess.Popen(
+            ['curl', '-s', '-F', 'reqtype=fileupload', '-F', f'time={validity}',
+             '-F', f'fileToUpload=@{audio_file}',
+             'https://litterbox.catbox.moe/resources/internals/api.php'],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        
+        # 定期检查进度（每30分钟报告一次）
+        check_interval = 30 * 60  # 30 分钟
+        start_time = time.time()
+        report_count = 0
+        
+        while proc.poll() is None:
             try:
-                os.remove(seg)
-            except:
-                pass
+                proc.wait(timeout=check_interval)
+            except subprocess.TimeoutExpired:
+                report_count += 1
+                elapsed_min = (time.time() - start_time) / 60
+                print(f"  [中转] 仍在上传中... (已等待 {elapsed_min:.0f} 分钟)")
         
-        # 清理压缩文件
-        try:
-            os.remove(compressed)
-        except:
-            pass
+        if proc.returncode != 0:
+            raise RuntimeError(f"litterbox 上传失败: {proc.stderr.read()[:200]}")
         
-        return '\n'.join(all_texts)
+        url = proc.stdout.read().strip()
+        if not url.startswith('http'):
+            raise RuntimeError(f"litterbox 返回异常: {url[:200]}")
+        
+        elapsed_min = (time.time() - start_time) / 60
+        print(f"  [中转] 上传完成！耗时 {elapsed_min:.1f} 分钟")
+        print(f"  [中转] 公开链接: {url}")
+        return url
+    
+    def _transcribe_via_relay(self, audio_file: str, file_size_mb: float, language: str = "zh") -> str:
+        """大文件通过网盘中转 + 阿里云 ASR（不分段）
+        
+        流程: 上传 litterbox → 拿到 URL → 提交阿里云 ASR → 轮询结果
+        """
+        import requests
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
+        api_key = self.api_key
+        base_url = 'https://dashscope.aliyuncs.com/api/v1'
+        start_time = time.time()
+        
+        # 1. 上传到 litterbox
+        file_url = self._upload_to_litterbox(audio_file, validity="72h")
+        
+        # 2. 提交阿里云 ASR 任务
+        print(f"  [ASR] 提交异步 ASR 任务...")
+        headers = {
+            'Authorization': f'Bearer {api_key}',
+            'Content-Type': 'application/json',
+            'X-DashScope-Async': 'enable'
+        }
+        payload = {
+            "model": self.MODEL,
+            "input": {"file_urls": [file_url]},
+            "parameters": {"language_hints": [language]}
+        }
+        
+        task_resp = requests.post(
+            f'{base_url}/services/audio/asr/transcription',
+            headers=headers, json=payload, timeout=30
+        )
+        task_data = task_resp.json()
+        task_id = task_data.get('output', {}).get('task_id')
+        if not task_id:
+            raise RuntimeError(f"ASR 任务提交失败：{task_data}")
+        
+        print(f"  [ASR] 任务 ID: {task_id}，等待转录完成...")
+        
+        # 3. 轮询任务状态（每30分钟报告一次，阿里云处理大文件可能需要较长时间）
+        max_wait = 3600  # 最长等 1 小时
+        poll_interval = 30  # 每 30 秒检查一次
+        report_every = 60  # 每 30 分钟报告一次
+        elapsed_poll = 0
+        transcription_url = None
+        task_status = ''
+        
+        while elapsed_poll < max_wait:
+            time.sleep(poll_interval)
+            elapsed_poll += poll_interval
+            
+            status_resp = requests.get(
+                f'{base_url}/tasks/{task_id}',
+                headers={'Authorization': f'Bearer {api_key}'},
+                timeout=15
+            )
+            status_data = status_resp.json()
+            task_status = status_data.get('output', {}).get('task_status', '')
+            
+            if task_status in ('SUCCEEDED', 'SUCCESS'):
+                output = status_data.get('output', {})
+                results = output.get('results', [])
+                if results and isinstance(results, list):
+                    transcription_url = results[0].get('transcription_url') if isinstance(results[0], dict) else None
+                break
+            elif task_status in ('FAILED', 'ERROR'):
+                raise RuntimeError(f"ASR 任务失败：{status_data}")
+            else:
+                # 定期报告
+                if int(elapsed_poll) % report_every == 0:
+                    print(f"  [ASR] 阿里云转录中... ({int(elapsed_poll)}s)")
+        
+        if transcription_url:
+            # 4. 下载转录结果
+            print(f"  [ASR] 获取转录结果...")
+            fetch_resp = requests.get(transcription_url, timeout=60)
+            trans_data = fetch_resp.json()
+            
+            texts = []
+            if 'transcripts' in trans_data:
+                for item in trans_data['transcripts']:
+                    if isinstance(item, dict):
+                        text = item.get('text', '')
+                        if text:
+                            texts.append(text)
+            
+            elapsed = time.time() - start_time
+            print(f"  [ASR] 转录完成 (耗时 {elapsed:.1f}s)，字符数: {sum(len(t) for t in texts)}")
+            return '\n'.join(texts) if texts else ''
+        
+        raise RuntimeError(f"ASR 任务超时或未获取到结果：{status_data}")
     
     def _compress_audio(self, audio_file: str) -> str:
         """压缩音频为 8kHz 单声道 mono，减小上传体积"""
@@ -152,7 +295,8 @@ class AliyunASR:
         # 分割
         n_segments = int(total_duration // duration) + 1
         for i in range(n_segments):
-            output = f"{os.path.splitext(audio_file)[0]}_part{i}.wav"
+            ext = os.path.splitext(audio_file)[1]
+            output = f"{os.path.splitext(audio_file)[0]}_part{i}{ext}"
             cmd = [
                 'ffmpeg', '-y', '-i', audio_file,
                 '-ss', str(i * duration),
@@ -228,7 +372,7 @@ class AliyunASR:
                 file_info_resp = requests.get(
                     f'{base_url}/files/{file_id}',
                     headers={'Authorization': f'Bearer {api_key}'},
-                    timeout=30, verify=False
+                    timeout=30
                 )
                 if file_info_resp.status_code != 200:
                     print(f"  [ASR] 获取 URL 失败: {file_info_resp.status_code} - {file_info_resp.text[:100]}")
@@ -258,7 +402,7 @@ class AliyunASR:
             
             task_resp = requests.post(
                 f'{base_url}/services/audio/asr/transcription',
-                headers=headers, json=payload, timeout=30, verify=False
+                headers=headers, json=payload, timeout=30
             )
             task_data = task_resp.json()
             task_id = task_data.get('output', {}).get('task_id')
@@ -281,7 +425,7 @@ class AliyunASR:
                 status_resp = requests.get(
                     f'{base_url}/tasks/{task_id}',
                     headers={'Authorization': f'Bearer {api_key}'},
-                    timeout=15, verify=False
+                    timeout=15
                 )
                 status_data = status_resp.json()
                 task_status = status_data.get('output', {}).get('task_status', '')
@@ -314,7 +458,7 @@ class AliyunASR:
             if transcription_url:
                 # 5. 下载转录结果
                 print(f"  [ASR] 获取转录结果...")
-                fetch_resp = requests.get(transcription_url, timeout=60, verify=False)
+                fetch_resp = requests.get(transcription_url, timeout=60)
                 trans_data = fetch_resp.json()
                 
                 # 新格式：transcripts[0].text

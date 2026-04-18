@@ -56,7 +56,15 @@ class VideoLearnerWiki:
     
     def __init__(self, config: dict = None):
         self.config = config or {}
-        self.asr = AliyunASR(api_key=os.getenv('ALIYUN_ASR_API_KEY') or os.getenv('DASHSCOPE_API_KEY'))
+        # ASR: 优先 Groq Whisper（免费），回退阿里云
+        asr_provider = os.getenv('ASR_PROVIDER', 'groq').lower()
+        if asr_provider == 'groq' and os.getenv('GROQ_API_KEY'):
+            from asr_groq import GroqASR
+            self.asr = GroqASR(api_key=os.getenv('GROQ_API_KEY'))
+            self.log('INFO', 'ASR引擎: Groq Whisper (免费)')
+        else:
+            self.asr = AliyunASR(api_key=os.getenv('ALIYUN_ASR_API_KEY') or os.getenv('DASHSCOPE_API_KEY'))
+            self.log('INFO', 'ASR引擎: 阿里云')
         self.note_gen = GLMNoteGenerator(api_key=os.getenv('GLM_API_KEY'))
         self.workspace = Path(os.getenv('WORKSPACE', Path.home() / '.openclaw' / 'workspace-video-learner')).expanduser().resolve()
         self.output_dir = self.workspace / 'output'

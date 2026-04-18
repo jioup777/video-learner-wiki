@@ -265,10 +265,14 @@ class FeishuUploader:
                     i += 1
                 code_text = '\n'.join(code_lines)
                 if code_text.strip():
-                    blocks.append({
-                        "block_type": 2,
-                        "text": {"elements": [{"text_run": {"content": f"[代码{lang}] {code_text[:200]}{'...' if len(code_text)>200 else ''}"}}]}
-                    })
+                    # 长文本拆分为多个 text 块（每块最多 5000 字符）
+                    chunk_size = 5000
+                    for ci in range(0, len(code_text), chunk_size):
+                        chunk = code_text[ci:ci+chunk_size]
+                        blocks.append({
+                            "block_type": 2,
+                            "text": {"elements": [{"text_run": {"content": chunk}}]}
+                        })
                 i += 1
                 continue
             

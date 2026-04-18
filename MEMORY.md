@@ -34,6 +34,8 @@
 - 音频格式不要转WAV（无压缩会变大），直接上传原始m4a
 - 笔记生成应在ASR后检查转录文本是否为空，避免产出空笔记
 - f2下载抖音视频偶尔会卡住无输出，注意cookies有效期(2-4周)
+- **抖音下载必须用f2库，不要用yt-dlp**(2026-04-08确认)：yt-dlp对抖音反爬无解(报Fresh cookies needed)，f2库+cookies可正常下载
+- 抖音视频处理应走video-learner-wiki skill流程：`python3 scripts/video_learner_wiki.py "URL"`，脚本内部自动识别平台、调用f2下载、ASR转录、GLM笔记
 - 飞书Wiki API: 创建节点用`/wiki/v2/spaces/{space_id}/nodes`，不是`/wiki/v2/nodes`
 - 飞书Docx API: 写入块用`/docx/v1/documents/{id}/blocks/{id}/children`，必须含block_id
 - 飞书block_type: 3=H1,4=H2,5=H3...2=text; bullet/code/quote/divider不支持API创建，降级为text块

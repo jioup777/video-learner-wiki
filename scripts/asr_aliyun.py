@@ -105,7 +105,7 @@ class AliyunASR:
         file_size_mb = file_size / 1024 / 1024
         print(f"  [ASR] 音频文件：{os.path.basename(audio_file)} ({file_size_mb:.1f} MB)")
         
-        LARGE_FILE_THRESHOLD_MB = 5  # 5MB 阈值
+        LARGE_FILE_THRESHOLD_MB = 0  # 所有文件走网盘中转（服务器上行带宽不足）
         
         if file_size_mb > LARGE_FILE_THRESHOLD_MB:
             print(f"  [ASR] 大文件检测：{file_size_mb:.1f}MB > {LARGE_FILE_THRESHOLD_MB}MB，启用网盘中转")

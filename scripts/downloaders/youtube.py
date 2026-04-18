@@ -33,7 +33,10 @@ class YouTubeDownloader:
     
     def __init__(self):
         self.temp_dir = tempfile.gettempdir()
-        self.cookies_file = os.getenv('YOUTUBE_COOKIES_PATH') or str(
+        cookies_path = os.getenv('YOUTUBE_COOKIES_PATH')
+        if cookies_path:
+            cookies_path = os.path.expanduser(cookies_path)
+        self.cookies_file = cookies_path or str(
             Path(__file__).parent.parent.parent / 'cookies' / 'youtube_cookies.txt'
         )
     
@@ -119,7 +122,8 @@ class YouTubeDownloader:
         try:
             cmd = YT_DLP_CMD + ['--list-subs']
             
-            # 添加代理
+            if Path(self.cookies_file).exists():
+                cmd.extend(['--cookies', self.cookies_file])
             if PROXY:
                 cmd.extend(['--proxy', PROXY])
             
@@ -140,23 +144,22 @@ class YouTubeDownloader:
                 r'\u4e2d\u4e2e\u7e2e\u6e80',  # 中文unicode
             ]
             
-            for line in output.split('\n'):
-                for pattern in chinese_lang_patterns:
-                    if re.search(pattern, line, re.IGNORECASE):
-                        if 'zh-CN' in line:
-                            return True, 'zh-Hans'
-                        elif 'zh-Hant' in line:
-                            return True, 'zh-Hant'
-                        elif 'zh-TW' in line:
-                            return True, 'zh-TW'
-                        elif 'zh' in line:
-                            return True, 'zh'
-                        elif 'Chinese' in line:
-                            return True, 'zh'
+            # 优先返回最具体的语言代码
+            if re.search(r'zh-Hans|Chinese \(Simplified\)', output):
+                return True, 'zh-Hans'
+            if re.search(r'zh-Hant|Chinese \(Traditional\)', output):
+                return True, 'zh-Hant'
+            if re.search(r'zh-TW', output):
+                return True, 'zh-TW'
+            if re.search(r'\bzh\b|Chinese', output):
+                return True, 'zh'
             
             # 未找到中文字幕，尝试英文字幕（可能需要翻译）
+            sub_cmd = YT_DLP_CMD + ['--list-subs', '--sub-lang', 'en']
+            if Path(self.cookies_file).exists():
+                sub_cmd.extend(['--cookies', self.cookies_file])
             result = subprocess.run(
-                YT_DLP_CMD + ['--list-subs', '--sub-lang', 'en', url],
+                sub_cmd + [url],
                 capture_output=True,
                 text=True,
                 timeout=30
@@ -173,13 +176,15 @@ class YouTubeDownloader:
         output_path = Path(self.temp_dir) / f"youtube_{video_id}"
         
         cmd = YT_DLP_CMD + [
+            '--write-auto-subs',
             '--write-subs',
             '--sub-langs', lang,
             '--skip-download',
             '-o', str(output_path),
         ]
         
-        # 添加代理
+        if Path(self.cookies_file).exists():
+            cmd.extend(['--cookies', self.cookies_file])
         if PROXY:
             cmd.extend(['--proxy', PROXY])
         
@@ -193,7 +198,9 @@ class YouTubeDownloader:
         )
         
         for ext in ['.zh-Hans.vtt', '.zh-CN.vtt', '.zh.vtt', '.vtt',
+                     '.zh-Hant.vtt', '.zh-TW.vtt',
                      '.zh-Hans.srt', '.zh-CN.srt', '.zh.srt', '.srt',
+                     '.zh-Hant.srt', '.zh-TW.srt',
                      '.en.vtt', '.en.srt']:
             subtitle_file = Path(self.temp_dir) / f"youtube_{video_id}{ext}"
             if subtitle_file.exists():
@@ -254,7 +261,8 @@ class YouTubeDownloader:
             '--no-playlist',
         ]
         
-        # 添加代理
+        if Path(self.cookies_file).exists():
+            cmd.extend(['--cookies', self.cookies_file])
         if PROXY:
             cmd.extend(['--proxy', PROXY])
         

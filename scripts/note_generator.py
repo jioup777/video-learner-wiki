@@ -1,6 +1,6 @@
 """
 GLM笔记生成模块
-使用GLM编码套餐专属Coding端点生成结构化学习笔记
+使用GLM-5-Turbo生成结构化学习笔记
 """
 
 import os
@@ -10,11 +10,14 @@ from datetime import datetime
 from typing import Optional
 import urllib.request
 import urllib.error
+import ssl
+# SSL fix for BigModel API
+ssl._create_default_https_context = ssl._create_unverified_context
 
 
 class GLMNoteGenerator:
     API_URL = "https://open.bigmodel.cn/api/coding/paas/v4/chat/completions"
-    MODEL = "glm-4-flash"  # GLM编码套餐专属模型
+    MODEL = "glm-5-turbo"
     
     SYSTEM_PROMPT = """你是一位专业的学习笔记整理专家。请根据视频转录文本，整理成结构化的学习笔记。
 
@@ -89,38 +92,27 @@ class GLMNoteGenerator:
         start_time = time.time()
         
         try:
-            req = urllib.request.Request(
-                self.API_URL,
-                data=json.dumps(payload).encode('utf-8'),
-                headers=headers,
-                method='POST'
-            )
-            
-            with urllib.request.urlopen(req, timeout=120) as response:
-                result = json.loads(response.read().decode('utf-8'))
-                
-                if 'choices' not in result or len(result['choices']) == 0:
-                    raise ValueError(f"API返回格式异常: {result}")
-                
-                content = result['choices'][0]['message']['content']
-                elapsed = time.time() - start_time
-                
-                usage = result.get('usage', {})
-                input_tokens = usage.get('prompt_tokens', 0)
-                output_tokens = usage.get('completion_tokens', 0)
-                
-                print(f"  [OK] GLM call success (elapsed {elapsed:.1f}s)")
-                print(f"     输入: {input_tokens} tokens, 输出: {output_tokens} tokens")
-                
-                return content
-                
-        except urllib.error.HTTPError as e:
-            error_body = e.read().decode('utf-8')
-            raise RuntimeError(f"GLM API错误 ({e.code}): {error_body}")
-        except urllib.error.URLError as e:
-            raise RuntimeError(f"GLM API网络错误: {e.reason}")
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"GLM API响应解析失败: {e}")
+            import requests
+            resp = requests.post(self.API_URL, json=payload, headers=headers, timeout=120)
+            resp.raise_for_status()
+            result = resp.json()
+            if 'choices' not in result or len(result['choices']) == 0:
+                raise ValueError(f"API返回格式异常: {result}")
+
+            content = result['choices'][0]['message']['content']
+            elapsed = time.time() - start_time
+
+            usage = result.get('usage', {})
+            input_tokens = usage.get('prompt_tokens', 0)
+            output_tokens = usage.get('completion_tokens', 0)
+
+            print(f"  [OK] GLM call success (elapsed {elapsed:.1f}s)")
+            print(f"     输入: {input_tokens} tokens, 输出: {output_tokens} tokens")
+
+            return content
+
+        except Exception as e:
+            raise RuntimeError(f"GLM API错误: {e}")
     
     def _format_note(self, generated_content: str, video_title: str, transcript: str) -> str:
         """格式化最终笔记"""
@@ -131,7 +123,7 @@ class GLMNoteGenerator:
 ## 📹 视频信息
 - **视频标题**: {video_title}
 - **处理时间**: {now.strftime('%Y-%m-%d %H:%M')}
-- **生成引擎**: GLM-4-Flash
+- **生成引擎**: GLM-5-Turbo
 
 ---
 
@@ -152,7 +144,7 @@ class GLMNoteGenerator:
 
 ---
 
-*🤖 此笔记由 Video Learner 使用 GLM-4-Flash 智能生成*
+*🤖 此笔记由 Video Learner 使用 GLM-5-Turbo 智能生成*
 *📅 生成时间: {now.strftime('%Y-%m-%d %H:%M:%S')}*
 """
         

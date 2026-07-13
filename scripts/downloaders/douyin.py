@@ -12,16 +12,10 @@ import tempfile
 import glob
 import shutil
 from pathlib import Path
-from dataclasses import dataclass
 
-
-@dataclass
-class DownloadResult:
-    title: str
-    audio_file: str | None = None
-    subtitle_file: str | None = None
-    subtitle_text: str | None = None
-    needs_transcription: bool = True
+# 统一数据模型(与各平台 downloader 共用)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from models import DownloadResult
 
 
 class DouyinDownloader:

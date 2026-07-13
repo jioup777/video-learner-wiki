@@ -11,7 +11,6 @@ import shutil
 import requests
 import sys
 from pathlib import Path
-from dataclasses import dataclass
 from typing import Optional, Tuple
 from urllib.parse import urlparse
 
@@ -19,13 +18,9 @@ YT_DLP_CMD = ['yt-dlp']
 PROXY = os.getenv('HTTPS_PROXY') or os.getenv('HTTP_PROXY') or os.getenv('VIDEO_LEARNER_PROXY')  # 可选代理
 
 
-@dataclass
-class DownloadResult:
-    title: str
-    audio_file: str = None
-    subtitle_file: str = None
-    subtitle_text: str = None
-    needs_transcription: bool = True
+# 统一数据模型(与各平台 downloader 共用)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from models import DownloadResult
 
 
 class YouTubeDownloader:

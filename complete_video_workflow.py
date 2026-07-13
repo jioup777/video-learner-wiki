@@ -13,6 +13,10 @@
   python3 complete_video_workflow.py "https://www.douyin.com/video/xxxxx" "我的视频"
 """
 
+# ⚠️ DEPRECATED: 本脚本与 video_learner_wiki.py 功能重复。
+# 统一以 scripts/video_learner_wiki.py 为唯一主入口。
+# 保留本文件仅为向后兼容,新功能不再在此添加。
+
 import os
 import sys
 import subprocess

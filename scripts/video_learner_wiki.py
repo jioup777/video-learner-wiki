@@ -83,8 +83,7 @@ class VideoLearnerWiki:
             video_id = self._extract_douyin_id(url)
             return 'douyin', video_id
         elif 'xiaohongshu.com' in url or 'xhslink.com' in url:
-            # 小红书笔记ID由 handler 提取(格式多变)
-            return 'xiaohongshu', 'pending'
+            return 'xiaohongshu', self._extract_xhs_id(url)
         else:
             raise ValueError(f"不支持的平台: {url}")
     
@@ -105,9 +104,55 @@ class VideoLearnerWiki:
         return "unknown"
     
     def _extract_douyin_id(self, url: str) -> str:
-        match = re.search(r'/video/(\d+)', url)
-        return match.group(0) if match else "unknown"
-    
+        """提取抖音视频ID。
+
+        优先匹配长链 /video/<数字>(注:group(1)取纯数字, 非 group(0) 的 '/video/xxx');
+        短链 v.douyin.com 跟随重定向解析后再匹配;
+        兜底用短链码(加 dy_ 前缀, 区分于纯数字ID)。失败返回 unknown。
+        """
+        # 长链: https://www.douyin.com/video/7619936329945615616
+        m = re.search(r'/video/(\d+)', url)
+        if m:
+            return m.group(1)
+        # 短链: https://v.douyin.com/ahoP0DhfTac/
+        if 'v.douyin.com' in url:
+            resolved = self._resolve_douyin_short_url(url)
+            m = re.search(r'/video/(\d+)', resolved)
+            if m:
+                return m.group(1)
+            m = re.search(r'v\.douyin\.com/([a-zA-Z0-9]+)', resolved)
+            if m:
+                return f"dy_{m.group(1)}"
+        return "unknown"
+
+    def _resolve_douyin_short_url(self, url: str) -> str:
+        """跟随抖音短链重定向拿完整URL(curl -L); 失败/超时返回原url(fail-soft)。
+
+        注: -o 必须用 os.devnull(Windows='nul'); 写 '/dev/null' 会让 curl rc=23
+        (Failed writing body), 历史上这就是抖音短链 video_id=unknown 的根因。
+        """
+        import subprocess
+        try:
+            cmd = ['curl', '-s', '-L', '--max-redirs', '5', '--max-time', '10',
+                   '-o', os.devnull, '-w', '%{url_effective}', url]
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               encoding='utf-8', errors='replace', timeout=15)
+            if r.stdout.strip() and '://' in r.stdout:
+                return r.stdout.strip()
+        except Exception:
+            pass
+        return url
+
+    def _extract_xhs_id(self, url: str) -> str:
+        """提取小红书笔记ID(格式多变): explore/note/discovery-item/xhslink。"""
+        for pat in [r'/(?:explore|note)/([a-zA-Z0-9]+)',
+                    r'/discovery/item/([a-zA-Z0-9]+)',
+                    r'xhslink\.com/([a-zA-Z0-9]+)']:
+            m = re.search(pat, url)
+            if m:
+                return m.group(1)
+        return "unknown"
+
     def log(self, level: str, message: str):
         colors = {
             'INFO': '\033[0;32m',

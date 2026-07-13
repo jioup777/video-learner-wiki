@@ -19,10 +19,11 @@ from models import DownloadResult, PostCaption
 
 
 def parse_f2_metadata(raw: dict) -> DownloadResult:
-    """从 f2 输出的视频 metadata JSON 解析文案 + 统计
+    """从 f2 metadata JSON 解析文案 + 统计(预留, 当前未调用)。
 
-    字段名基于 f2 dy 模式常见输出(desc/text_extra/statistics/author/duration)。
-    真实字段以 f2 实测为准(见 Task 4b 环境探查),此处先建骨架。
+    实测 f2 0.0.1.7 -d true 只输出 _desc.txt 纯文本, 不输出 JSON
+    (app.yaml 无 save_data)。此函数保留作未来 f2 支持 JSON 输出时的字段映射;
+    当前文案解析走 _try_parse_f2_metadata → _build_result_from_desc。
     """
     desc = raw.get("desc") or ""
     hashtags = [f"#{t['hashtag_name']}" for t in raw.get("text_extra", [])
@@ -109,26 +110,41 @@ class DouyinDownloader:
         return result
 
     def _try_parse_f2_metadata(self, output_dir: str, fallback_title: str = "") -> DownloadResult:
-        """从 f2 输出目录找 metadata JSON 并解析。
+        """从 f2 输出目录读 _desc.txt(视频文案正文) → 文案+标签。
 
-        f2 的 JSON 输出位置/字段名待真实环境校准(Task 4b Step 1 探查)。
-        此处假设: f2 在 output_dir 下输出 *.json, 含 desc 字段。
+        f2 -d true 产出 <video>_desc.txt(纯文本, naming 模板 {create}_{desc} 渲染:
+        空格/换行→_)。实测 f2 0.0.1.7 不输出 statistics/author 的 JSON
+        (app.yaml 无 save_data 项), 故 view/like/comment/creator 留空(None)。
         """
-        import json as _json
-        json_candidates = glob.glob(os.path.join(output_dir, "**", "*.json"), recursive=True)
-        for jp in json_candidates:
+        desc_files = glob.glob(os.path.join(output_dir, "**", "*_desc.txt"), recursive=True)
+        for dp in desc_files:
             try:
-                raw = _json.load(open(jp, encoding="utf-8"))
-                if isinstance(raw, list):
-                    raw = next((x for x in raw if isinstance(x, dict) and x.get("desc")),
-                               raw[0] if raw else {})
-                if isinstance(raw, dict) and raw.get("desc"):
-                    print(f"  [抖音] 解析 f2 metadata: {jp}")
-                    return parse_f2_metadata(raw)
+                content = open(dp, encoding="utf-8").read().strip()
+                if content:
+                    print(f"  [抖音] 解析 f2 文案(_desc.txt): {len(content)} 字符")
+                    return self._build_result_from_desc(content, fallback_title)
             except Exception as e:
-                print(f"  [抖音] 解析 {jp} 失败(跳过): {e}")
-        print(f"  [抖音] 未找到含 desc 的 f2 metadata JSON, 文案字段为空(待 Task 4b 校准)")
+                print(f"  [抖音] 读 {os.path.basename(dp)} 失败(跳过): {e}")
+        print(f"  [抖音] 未找到 _desc.txt, 文案字段为空(f2 -d 可能未生效)")
         return DownloadResult(title=fallback_title or "抖音视频")
+
+    def _build_result_from_desc(self, content: str, fallback_title: str) -> DownloadResult:
+        """从 f2 _desc.txt 文案构建 DownloadResult。
+
+        content 形如 '正文__#tag1_#tag2'(f2 把空格/换行渲染为 _)。
+        正文还原空格, hashtags 提取 #xxx(xxx 不含 _/#)。
+        """
+        hashtags = re.findall(r'#([^\s#_]+)', content)
+        body = content.split('#')[0].replace('_', ' ').strip()
+        caption = PostCaption(raw_text=content, hashtags=[f"#{h}" for h in hashtags])
+        title = (body[:40] if body else fallback_title) or "抖音视频"
+        return DownloadResult(
+            title=title,
+            description=body or content,
+            tags=hashtags,
+            caption=caption,
+            # statistics/creator: f2 不提供, 留空(见 _try_parse_f2_metadata docstring)
+        )
     
     def _resolve_url(self, url: str) -> str:
         """将抖音短链接解析为完整 URL"""
@@ -136,10 +152,11 @@ class DouyinDownloader:
             return url
         
         try:
-            cmd = ['curl', '-s', '-o', '/dev/null', '-w', '%{url_effective}',
+            # -o 用 os.devnull(Windows='nul'); '/dev/null' 在 Windows 让 curl rc=23(写body失败)
+            cmd = ['curl', '-s', '-o', os.devnull, '-w', '%{url_effective}',
                    '-L', '--max-redirs', '5', url]
             result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15)
-            if result.returncode == 0 and result.stdout.strip():
+            if result.stdout.strip() and '://' in result.stdout:
                 resolved = result.stdout.strip()
                 if 'douyin.com/video/' in resolved:
                     return resolved
@@ -183,6 +200,7 @@ class DouyinDownloader:
             '-k', cookie_str,
             '-p', output_dir,
             '-M', 'one',
+            '-d', 'true',  # 保存视频文案(产出 <video>_desc.txt, Task 4b)
             '--languages', 'zh_CN',
         ]
         

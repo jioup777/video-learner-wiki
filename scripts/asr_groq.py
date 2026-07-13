@@ -88,10 +88,16 @@ def _transcribe_single(audio_file: str, language: str, api_key: str, model: str)
     data = {"model": model, "response_format": "verbose_json", "timestamp_granularities[]": "segment"}
     if language:
         data["language"] = language
+    # asr_prompt: 带标点的中文领域文本, 引导模型输出标点 + 识别专有名词(spec 技术决策4)
+    asr_prompt = os.getenv("GROQ_ASR_PROMPT", "")
+    if asr_prompt:
+        data["prompt"] = asr_prompt
+    # GROQ_PROXY: 仅 Groq 走代理(国内 403), 用独立变量避免影响 f2 抖音下载(读 HTTPS_PROXY)
+    proxies = {"https": os.getenv("GROQ_PROXY")} if os.getenv("GROQ_PROXY") else None
 
     with open(audio_file, "rb") as f:
         files = {"file": (os.path.basename(audio_file), f)}
-        resp = requests.post(GROQ_API_URL, headers=headers, data=data, files=files, timeout=300)
+        resp = requests.post(GROQ_API_URL, headers=headers, data=data, files=files, proxies=proxies, timeout=300)
 
     if resp.status_code != 200:
         raise RuntimeError(f"Groq API 错误: {resp.status_code} - {resp.text}")
@@ -129,10 +135,10 @@ def _transcribe_single(audio_file: str, language: str, api_key: str, model: str)
 
 
 def _compress_audio(audio_file: str) -> str:
-    """用ffmpeg压缩音频到16kHz mono flac"""
+    """用ffmpeg压缩音频到16kHz mono aac 32k(有损, 比flac小10倍, 整体降到<25MB避免分片SSL EOF)"""
     import subprocess, tempfile
-    output = tempfile.mktemp(suffix=".flac")
-    cmd = ["ffmpeg", "-y", "-i", audio_file, "-ar", "16000", "-ac", "1", "-map", "0:a", "-c:a", "flac", output]
+    output = tempfile.mktemp(suffix=".m4a")
+    cmd = ["ffmpeg", "-y", "-i", audio_file, "-ar", "16000", "-ac", "1", "-map", "0:a", "-c:a", "aac", "-b:a", "32k", output]
     try:
         r = subprocess.run(cmd, capture_output=True, timeout=120)
         if r.returncode == 0 and os.path.exists(output):

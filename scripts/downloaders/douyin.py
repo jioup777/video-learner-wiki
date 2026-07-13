@@ -138,7 +138,7 @@ class DouyinDownloader:
         try:
             cmd = ['curl', '-s', '-o', '/dev/null', '-w', '%{url_effective}',
                    '-L', '--max-redirs', '5', url]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=15)
             if result.returncode == 0 and result.stdout.strip():
                 resolved = result.stdout.strip()
                 if 'douyin.com/video/' in resolved:
@@ -192,8 +192,9 @@ class DouyinDownloader:
             cmd,
             capture_output=True,
             text=True,
+            encoding='utf-8', errors='replace',  # Win GBK 崩修复(f2 输出含中文/emoji)
             timeout=300,
-            cwd='/tmp'  # 避开 secrets/ 目录冲突
+            cwd=tempfile.gettempdir()  # 避开 workspace secrets/ 目录冲突(跨平台: Linux=/tmp, Windows=系统临时目录)
         )
         
         if result.returncode != 0:
@@ -267,6 +268,7 @@ class DouyinDownloader:
             cmd,
             capture_output=True,
             text=True,
+            encoding='utf-8', errors='replace',
             timeout=60
         )
         

@@ -17,3 +17,7 @@ secrets/
 asr_log.txt
 audio_output.wav
 config.local.json
+
+# 本地环境(不提交)
+.venv/
+downloads/

@@ -5,25 +5,20 @@ Bilibili下载处理器
 
 import os
 import re
+import json
 import subprocess
 import sys
 import tempfile
 import shutil
 from pathlib import Path
-from dataclasses import dataclass
-from datetime import datetime
 
-YT_DLP_CMD = ['yt-dlp']
-PROXY = os.getenv('HTTPS_PROXY') or os.getenv('HTTP_PROXY') or os.getenv('VIDEO_LEARNER_PROXY')  # 可选代理
+YT_DLP_CMD = [sys.executable, '-m', 'yt_dlp']  # 用当前python跑yt_dlp模块(不依赖PATH/venv未激活)
+PROXY = os.getenv('VIDEO_LEARNER_PROXY') or os.getenv('HTTPS_PROXY') or os.getenv('HTTP_PROXY')  # VIDEO_LEARNER_PROXY优先
 
 
-@dataclass
-class DownloadResult:
-    title: str
-    audio_file: str | None = None
-    subtitle_file: str | None = None
-    subtitle_text: str | None = None
-    needs_transcription: bool = True
+# 统一数据模型(Task1 已抽到 models.py)
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from models import DownloadResult, PostCaption
 
 
 class BilibiliDownloader:
@@ -37,30 +32,67 @@ class BilibiliDownloader:
         self.cookies_valid = self._validate_cookies()
     
     def process(self, url: str) -> DownloadResult:
-        """处理B站视频：先尝试获取字幕，有字幕则跳过ASR"""
+        """处理B站视频: 文案提取 + 字幕优先/ASR兜底"""
         video_id = self._extract_bvid(url)
-        
+
         title = self._get_title(url)
-        
+        info = self._get_info_json(url, video_id)  # 文案+统计(7层契约)
+
+        description = info.get('description') or ''
+        tags = info.get('tags') or info.get('categories') or []
+        caption = PostCaption.from_text(description) if description else None
+        duration_sec = int(info.get('duration')) if info.get('duration') else None
+        published = info.get('upload_date') or ''
+        if len(published) == 8:
+            published = f"{published[:4]}-{published[4:6]}-{published[6:8]}"
+
+        common = dict(
+            description=description, tags=tags, caption=caption,
+            duration_sec=duration_sec,
+            view_count=info.get('view_count') or info.get('play_count'),
+            like_count=info.get('like_count'),
+            comment_count=info.get('comment_count'),
+            creator=info.get('uploader') or info.get('channel'),
+            creator_url=info.get('uploader_url') or info.get('channel_url'),
+            published_at=published,
+        )
+
         # 尝试获取字幕（CC/AI字幕）
         subtitle_text = self._try_get_subtitle(url, video_id)
-        
+
         if subtitle_text:
-            # 有字幕，不需要下载音频和ASR
             return DownloadResult(
-                title=title,
-                subtitle_text=subtitle_text,
-                needs_transcription=False
+                title=title, subtitle_text=subtitle_text,
+                needs_transcription=False, **common
             )
-        
-        # 无字幕，下载音频走ASR流程
+
+        # 无字幕，下载音频走ASR
         audio_file = self._download_audio(url, video_id)
-        
         return DownloadResult(
-            title=title,
-            audio_file=audio_file,
-            needs_transcription=True
+            title=title, audio_file=audio_file,
+            needs_transcription=True, **common
         )
+
+    def _get_info_json(self, url: str, video_id: str) -> dict:
+        """用 yt-dlp --write-info-json 获取视频元数据(文案/统计), 失败返回空dict"""
+        output_path = Path(tempfile.gettempdir()) / f"bilibili_{video_id}"
+        cmd = YT_DLP_CMD + ['--write-info-json', '--skip-download', '-o', str(output_path)]
+        if Path(self.cookies_file).exists():
+            cmd.extend(['--cookies', str(self.cookies_file)])
+        if PROXY:
+            cmd.extend(['--proxy', PROXY])
+        cmd.append(url)
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=60)
+        except Exception:
+            pass
+        info_file = Path(tempfile.gettempdir()) / f"bilibili_{video_id}.info.json"
+        if info_file.exists():
+            try:
+                return json.loads(info_file.read_text(encoding='utf-8'))
+            except Exception:
+                return {}
+        return {}
     
     def _try_get_subtitle(self, url: str, video_id: str) -> str | None:
         """尝试获取B站视频字幕（CC字幕 > AI字幕）"""
@@ -85,7 +117,7 @@ class BilibiliDownloader:
                 cmd.extend(['--proxy', PROXY])
             cmd.append(url)
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30)
             
             # 查找下载的字幕文件
             for ext in ['.vtt', '.srt', '.ass']:
@@ -176,7 +208,7 @@ class BilibiliDownloader:
             if PROXY:
                 cmd.extend(['--proxy', PROXY])
             cmd.append(url)
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30)
             if result.returncode == 0 and result.stdout.strip():
                 extracted = result.stdout.strip()
                 match = re.search(r'BV[a-zA-Z0-9]+', extracted)
@@ -225,7 +257,7 @@ class BilibiliDownloader:
                     result = subprocess.run(
                         ['yt-dlp', '--cookies-from-browser', 'chrome', '--get-title', url],
                         capture_output=True,
-                        text=True,
+                        text=True, encoding='utf-8', errors='replace',
                         timeout=30
                     )
                     if result.returncode == 0 and result.stdout.strip():
@@ -237,7 +269,7 @@ class BilibiliDownloader:
                 cmd.extend(['--proxy', PROXY])
             cmd.append(url)
             
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30)
             
             if result.returncode == 0 and result.stdout.strip():
                 return result.stdout.strip()
@@ -266,7 +298,7 @@ class BilibiliDownloader:
         
         cmd.append(url)
         
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300)
         
         if result.returncode != 0:
             error_msg = result.stderr.strip() if result.stderr else "未知错误"

@@ -19,13 +19,14 @@ from typing import Optional
 from datetime import datetime
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(Path(__file__).parent.parent / '.env')  # 明确从项目根加载 .env(不依赖 cwd)
 
 # 导入原有模块
 sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace-video-learner/scripts'))
 from downloaders.bilibili import BilibiliDownloader
 from downloaders.youtube import YouTubeDownloader
 from downloaders.douyin import DouyinDownloader
+from downloaders.xiaohongshu import XiaoHongShuDownloader
 from asr_aliyun import AliyunASR
 from metadata import build_metadata
 from summarizer import summarize
@@ -50,6 +51,7 @@ class VideoLearnerWiki:
         'bilibili': BilibiliDownloader,
         'youtube': YouTubeDownloader,
         'douyin': DouyinDownloader,
+        'xiaohongshu': XiaoHongShuDownloader,
     }
     
     def __init__(self):
@@ -57,7 +59,7 @@ class VideoLearnerWiki:
         asr_provider = os.getenv('ASR_PROVIDER', 'groq').lower()
         if asr_provider == 'groq' and os.getenv('GROQ_API_KEY'):
             from asr_groq import GroqASR
-            self.asr = GroqASR(api_key=os.getenv('GROQ_API_KEY'))
+            self.asr = GroqASR()  # 无参→自动读 GROQ_API_KEY+GROQ_API_KEYS 多key轮换
             self.log('INFO', 'ASR引擎: Groq Whisper (免费)')
         else:
             self.asr = AliyunASR(api_key=os.getenv('ALIYUN_ASR_API_KEY') or os.getenv('DASHSCOPE_API_KEY'))
@@ -80,6 +82,9 @@ class VideoLearnerWiki:
         elif 'douyin.com' in url or 'v.douyin.com' in url:
             video_id = self._extract_douyin_id(url)
             return 'douyin', video_id
+        elif 'xiaohongshu.com' in url or 'xhslink.com' in url:
+            # 小红书笔记ID由 handler 提取(格式多变)
+            return 'xiaohongshu', 'pending'
         else:
             raise ValueError(f"不支持的平台: {url}")
     

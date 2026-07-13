@@ -6,7 +6,7 @@ from typing import Optional, List, TYPE_CHECKING
 if TYPE_CHECKING:
     from models import PostCaption
 
-VALID_TOPICS = ["AI科技", "内容创作", "IP运营", "成功方法论"]
+VALID_TOPICS = ["AI科技", "内容创作", "IP运营", "成功方法论", "搞钱收集"]
 SCHEMA_VERSION = "1.0"
 
 

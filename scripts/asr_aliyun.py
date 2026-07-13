@@ -80,12 +80,10 @@ class AliyunASR:
             )
         
         if not DASHSCOPE_AVAILABLE:
-            raise ImportError(
-                "dashscope 库未安装。\n"
-                "请运行：pip install dashscope"
-            )
-        
-        dashscope.api_key = self.api_key
+            # 实际 ASR 调用走 HTTP requests(_transcribe_with_upload), 不依赖 dashscope SDK
+            print("  [ASR] dashscope SDK 未装, 使用 HTTP requests 直传(无需 SDK)")
+        else:
+            dashscope.api_key = self.api_key
     
     def transcribe(self, audio_file: str, language: str = "zh") -> str:
         """
@@ -105,7 +103,7 @@ class AliyunASR:
         file_size_mb = file_size / 1024 / 1024
         print(f"  [ASR] 音频文件：{os.path.basename(audio_file)} ({file_size_mb:.1f} MB)")
         
-        LARGE_FILE_THRESHOLD_MB = 0  # 所有文件走网盘中转（服务器上行带宽不足）
+        LARGE_FILE_THRESHOLD_MB = 50  # 50MB以下直接上传DashScope(本地带宽足); 超过才走litterbox中转(OpenClaw服务器上行慢可设0)
         
         if file_size_mb > LARGE_FILE_THRESHOLD_MB:
             print(f"  [ASR] 大文件检测：{file_size_mb:.1f}MB > {LARGE_FILE_THRESHOLD_MB}MB，启用网盘中转")

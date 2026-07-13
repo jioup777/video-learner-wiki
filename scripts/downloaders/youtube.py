@@ -5,6 +5,7 @@ YouTube下载处理器
 
 import os
 import re
+import json
 import subprocess
 import tempfile
 import shutil
@@ -14,13 +15,13 @@ from pathlib import Path
 from typing import Optional, Tuple
 from urllib.parse import urlparse
 
-YT_DLP_CMD = ['yt-dlp']
-PROXY = os.getenv('HTTPS_PROXY') or os.getenv('HTTP_PROXY') or os.getenv('VIDEO_LEARNER_PROXY')  # 可选代理
+YT_DLP_CMD = [sys.executable, '-m', 'yt_dlp']  # 用当前python跑yt_dlp模块(不依赖PATH/venv未激活)
+PROXY = os.getenv('VIDEO_LEARNER_PROXY') or os.getenv('HTTPS_PROXY') or os.getenv('HTTP_PROXY')  # VIDEO_LEARNER_PROXY优先(避免全局HTTPS_PROXY错端口)
 
 
 # 统一数据模型(与各平台 downloader 共用)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from models import DownloadResult
+from models import DownloadResult, PostCaption
 
 
 class YouTubeDownloader:
@@ -36,31 +37,69 @@ class YouTubeDownloader:
         )
     
     def process(self, url: str) -> DownloadResult:
-        """处理YouTube视频"""
+        """处理YouTube视频: 文案提取 + 字幕优先/ASR兜底"""
         video_id = self._extract_video_id(url)
-        
+
         title = self._get_title(url, video_id)
-        
+        info = self._get_info_json(url, video_id)  # 文案+统计(7层契约)
+
+        description = info.get('description') or ''
+        tags = info.get('tags') or []
+        caption = PostCaption.from_text(description) if description else None
+        duration_sec = int(info.get('duration')) if info.get('duration') else None
+        published = info.get('upload_date') or ''
+        if len(published) == 8:
+            published = f"{published[:4]}-{published[4:6]}-{published[6:8]}"
+
+        common = dict(
+            description=description, tags=tags, caption=caption,
+            duration_sec=duration_sec,
+            view_count=info.get('view_count'),
+            like_count=info.get('like_count'),
+            comment_count=info.get('comment_count'),
+            creator=info.get('uploader') or info.get('channel'),
+            creator_url=info.get('uploader_url') or info.get('channel_url'),
+            published_at=published,
+        )
+
         has_subtitle, subtitle_lang = self._check_subtitles(url, video_id)
-        
+
         if has_subtitle:
-            subtitle_file = self._download_subtitle(url, video_id, subtitle_lang)
-            subtitle_text = self._parse_subtitle(subtitle_file)
-            
-            return DownloadResult(
-                title=title,
-                subtitle_file=subtitle_file,
-                subtitle_text=subtitle_text,
-                needs_transcription=False
-            )
-        else:
-            audio_file = self._download_audio(url, video_id)
-            
-            return DownloadResult(
-                title=title,
-                audio_file=audio_file,
-                needs_transcription=True
-            )
+            try:
+                subtitle_file = self._download_subtitle(url, video_id, subtitle_lang)
+                subtitle_text = self._parse_subtitle(subtitle_file)
+                return DownloadResult(
+                    title=title, subtitle_file=subtitle_file, subtitle_text=subtitle_text,
+                    needs_transcription=False, **common
+                )
+            except Exception as e:
+                print(f"  [YouTube] 字幕下载失败({subtitle_lang}): {e}, 回退ASR", file=sys.stderr)
+        # 无字幕或字幕下载失败 → ASR兜底
+        audio_file = self._download_audio(url, video_id)
+        return DownloadResult(
+            title=title, audio_file=audio_file, needs_transcription=True, **common
+        )
+
+    def _get_info_json(self, url: str, video_id: str) -> dict:
+        """用 yt-dlp --write-info-json 获取视频元数据(文案/统计), 失败返回空dict"""
+        output_path = Path(self.temp_dir) / f"youtube_{video_id}"
+        cmd = YT_DLP_CMD + ['--write-info-json', '--skip-download', '-o', str(output_path)]
+        if Path(self.cookies_file).exists():
+            cmd.extend(['--cookies', self.cookies_file])
+        if PROXY:
+            cmd.extend(['--proxy', PROXY])
+        cmd.append(url)
+        try:
+            subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=60)
+        except Exception:
+            pass
+        info_file = Path(self.temp_dir) / f"youtube_{video_id}.info.json"
+        if info_file.exists():
+            try:
+                return json.loads(info_file.read_text(encoding='utf-8'))
+            except Exception:
+                return {}
+        return {}
     
     def _extract_video_id(self, url: str) -> str:
         """提取YouTube视频ID"""
@@ -88,7 +127,7 @@ class YouTubeDownloader:
                     result = subprocess.run(
                         ['yt-dlp', '--cookies-from-browser', 'chrome', '--get-title', url],
                         capture_output=True,
-                        text=True,
+                        text=True, encoding='utf-8', errors='replace',
                         timeout=30
                     )
                     if result.returncode == 0 and result.stdout.strip():
@@ -104,7 +143,7 @@ class YouTubeDownloader:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
-                text=True,
+                text=True, encoding='utf-8', errors='replace',
                 timeout=30
             )
             if result.returncode == 0 and result.stdout.strip():
@@ -126,7 +165,7 @@ class YouTubeDownloader:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
-                text=True,
+                text=True, encoding='utf-8', errors='replace',
                 timeout=30
             )
             
@@ -156,7 +195,7 @@ class YouTubeDownloader:
             result = subprocess.run(
                 sub_cmd + [url],
                 capture_output=True,
-                text=True,
+                text=True, encoding='utf-8', errors='replace',
                 timeout=30
             )
             if 'en' in result.stdout.lower():
@@ -188,7 +227,7 @@ class YouTubeDownloader:
         result = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
+            text=True, encoding='utf-8', errors='replace',
             timeout=60
         )
         
@@ -266,7 +305,7 @@ class YouTubeDownloader:
         result = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
+            text=True, encoding='utf-8', errors='replace',
             timeout=300
         )
         

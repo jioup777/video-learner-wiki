@@ -17,18 +17,49 @@ MODEL = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
 MAX_FILE_SIZE = 25 * 1024 * 1024
 
 
+def _get_all_keys():
+    """获取所有可用的 Groq API keys，支持轮换"""
+    keys = []
+    # 主key
+    primary = os.getenv("GROQ_API_KEY", "")
+    if primary:
+        keys.append(primary)
+    # 备用keys（逗号分隔）
+    extras = os.getenv("GROQ_API_KEYS", "")
+    if extras:
+        for k in extras.split(","):
+            k = k.strip()
+            if k and k not in keys:
+                keys.append(k)
+    return keys
+
+
 class GroqASR:
-    """Groq Whisper ASR，兼容 AliyunASR 接口"""
+    """Groq Whisper ASR，兼容 AliyunASR 接口，支持多key轮换"""
 
     def __init__(self, api_key: str = None):
-        self.api_key = api_key or os.getenv("GROQ_API_KEY")
+        if api_key:
+            self.api_keys = [api_key]
+        else:
+            self.api_keys = _get_all_keys()
         self.model = os.getenv("GROQ_WHISPER_MODEL", "whisper-large-v3-turbo")
 
     def transcribe(self, audio_file: str, language: str = None) -> str:
-        """转录音频文件，返回文本"""
-        if not self.api_key:
-            raise ValueError("需要设置 GROQ_API_KEY")
-        return _transcribe_impl(audio_file, language, self.api_key, self.model)
+        """转录音频文件，返回文本，自动轮换key"""
+        if not self.api_keys:
+            raise ValueError("需要设置 GROQ_API_KEY 或 GROQ_API_KEYS")
+        last_err = None
+        for key in self.api_keys:
+            try:
+                return _transcribe_impl(audio_file, language, key, self.model)
+            except RuntimeError as e:
+                err_str = str(e)
+                if "rate_limit" in err_str.lower() or "429" in err_str:
+                    print(f"[Groq Whisper] Key ...{key[-6:]} 配额用完，切换下一个", file=sys.stderr)
+                    last_err = e
+                    continue
+                raise
+        raise RuntimeError(f"所有 Groq API keys 配额用完: {last_err}")
 
 
 def _transcribe_impl(audio_file: str, language: str, api_key: str, model: str) -> str:

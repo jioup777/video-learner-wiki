@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """
 Video Learner Wiki版本
-从视频生成学习笔记并上传到飞书Wiki
+从视频生成转录文本，笔记生成由Agent大模型完成
 
-核心改进：使用OpenClaw飞书工具上传到Wiki节点
+核心改进：
+- 不再依赖GLM API生成笔记
+- Agent直接用当前对话大模型生成笔记
+- 脚本只负责：下载音频 + ASR转录
 """
 
 import os
 import sys
 import re
 import argparse
-import tempfile
-import subprocess
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
@@ -26,7 +27,6 @@ from downloaders.bilibili import BilibiliDownloader
 from downloaders.youtube import YouTubeDownloader
 from downloaders.douyin import DouyinDownloader
 from asr_aliyun import AliyunASR
-from note_generator import GLMNoteGenerator
 
 
 @dataclass
@@ -34,19 +34,15 @@ class ProcessResult:
     title: str
     video_id: str
     platform: str
+    video_url: str = ""
     audio_file: Optional[str] = None
-    subtitle_file: Optional[str] = None
-    subtitle_text: Optional[str] = None
     transcript: Optional[str] = None
-    note_file: Optional[str] = None
-    feishu_link: Optional[str] = None
-    wiki_node_token: Optional[str] = None
-    needs_transcription: bool = True
+    transcript_file: Optional[str] = None
     errors: list = field(default_factory=list)
 
 
 class VideoLearnerWiki:
-    """视频学习笔记生成器（Wiki版本）"""
+    """视频转录器（Agent负责笔记生成和Wiki上传）"""
     
     PLATFORM_HANDLERS = {
         'bilibili': BilibiliDownloader,
@@ -54,8 +50,7 @@ class VideoLearnerWiki:
         'douyin': DouyinDownloader,
     }
     
-    def __init__(self, config: dict = None):
-        self.config = config or {}
+    def __init__(self):
         # ASR: 优先 Groq Whisper（免费），回退阿里云
         asr_provider = os.getenv('ASR_PROVIDER', 'groq').lower()
         if asr_provider == 'groq' and os.getenv('GROQ_API_KEY'):
@@ -65,14 +60,10 @@ class VideoLearnerWiki:
         else:
             self.asr = AliyunASR(api_key=os.getenv('ALIYUN_ASR_API_KEY') or os.getenv('DASHSCOPE_API_KEY'))
             self.log('INFO', 'ASR引擎: 阿里云')
-        self.note_gen = GLMNoteGenerator(api_key=os.getenv('GLM_API_KEY'))
+        
         self.workspace = Path(os.getenv('WORKSPACE', Path.home() / '.openclaw' / 'workspace-video-learner')).expanduser().resolve()
         self.output_dir = self.workspace / 'output'
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Wiki配置
-        self.space_id = os.getenv('FEISHU_SPACE_ID')
-        self.parent_token = os.getenv('FEISHU_PARENT_TOKEN')
     
     def detect_platform(self, url: str) -> tuple:
         """识别平台和视频ID"""
@@ -91,14 +82,10 @@ class VideoLearnerWiki:
             raise ValueError(f"不支持的平台: {url}")
     
     def _extract_bvid(self, url: str) -> str:
-        """提取B站BV号"""
         match = re.search(r'BV([a-zA-Z0-9]+)', url)
-        if match:
-            return match.group(1)
-        return "unknown"
+        return match.group(0) if match else "unknown"
     
     def _extract_youtube_id(self, url: str) -> str:
-        """提取YouTube视频ID"""
         patterns = [
             r'(?:v=|youtu\.be/)([a-zA-Z0-9_-]{11})',
             r'youtube\.com/embed/([a-zA-Z0-9_-]{11})',
@@ -111,14 +98,10 @@ class VideoLearnerWiki:
         return "unknown"
     
     def _extract_douyin_id(self, url: str) -> str:
-        """提取抖音视频ID"""
         match = re.search(r'/video/(\d+)', url)
-        if match:
-            return match.group(1)
-        return "unknown"
+        return match.group(0) if match else "unknown"
     
     def log(self, level: str, message: str):
-        """统一日志输出"""
         colors = {
             'INFO': '\033[0;32m',
             'WARN': '\033[1;33m',
@@ -128,153 +111,95 @@ class VideoLearnerWiki:
         nc = '\033[0m'
         print(f"{colors.get(level, '')}[{level}]{nc} {message}", file=sys.stderr)
     
-    def process(self, url: str, skip_upload: bool = False) -> ProcessResult:
-        """主处理流程"""
+    def process(self, url: str) -> ProcessResult:
+        """处理视频：下载 + ASR转录，返回转录文本供Agent生成笔记"""
         start_time = datetime.now()
-        result = ProcessResult(title="", video_id="", platform="")
+        result = ProcessResult(title="", video_id="", platform="", video_url=url)
         
-        try:
-            # Step 1: 平台识别
-            self.log("STEP", "步骤 1/5: 平台识别...")
-            platform, video_id = self.detect_platform(url)
-            result.platform = platform
-            result.video_id = video_id
-            self.log("INFO", f"平台: {platform}, ID: {video_id}")
-            
-            # Step 2: 下载/获取字幕
-            self.log("STEP", "步骤 2/5: 下载视频/获取字幕...")
-            handler_class = self.PLATFORM_HANDLERS.get(platform)
-            if not handler_class:
-                raise ValueError(f"不支持的平台: {platform}")
-            
-            handler = handler_class()
-            download_result = handler.process(url)
-            
-            result.title = download_result.title
-            result.audio_file = download_result.audio_file
-            result.subtitle_file = download_result.subtitle_file
-            result.subtitle_text = download_result.subtitle_text
-            result.needs_transcription = download_result.needs_transcription
-            
-            if download_result.subtitle_text:
-                self.log("INFO", f"✓ 获取到字幕文本 ({len(download_result.subtitle_text)} 字符)")
-            elif download_result.audio_file:
-                self.log("INFO", f"✓ 音频已下载: {download_result.audio_file}")
-            
-            # Step 3: ASR转录(如需要)
-            if result.needs_transcription and result.audio_file:
-                self.log("STEP", "步骤 3/5: ASR转录...")
-                transcript = self.asr.transcribe(result.audio_file)
-                result.transcript = transcript
-                self.log("INFO", f"✓ 转录完成 ({len(transcript)} 字符)")
-            elif result.subtitle_text:
-                result.transcript = result.subtitle_text
-                self.log("INFO", "✓ 使用字幕文本，跳过ASR")
-            else:
-                raise ValueError("无法获取转录文本：没有音频文件也没有字幕")
-            
-            # Step 4: 生成笔记
-            self.log("STEP", "步骤 4/5: 生成学习笔记...")
-            note_content = self.note_gen.generate(result.transcript, result.title)
-            
-            note_file = self.output_dir / f"{platform}_{video_id}_note.md"
-            with open(note_file, 'w', encoding='utf-8') as f:
-                f.write(note_content)
-            result.note_file = str(note_file)
-            self.log("INFO", f"✓ 笔记已生成: {note_file.name}")
-            
-            # Step 5: 上传飞书Wiki
-            if not skip_upload:
-                self.log("STEP", "步骤 5/5: 上传飞书Wiki...")
-                feishu_link = self._upload_to_wiki(note_content, result.title)
-                result.feishu_link = feishu_link
-                self.log("INFO", f"✓ 飞书Wiki: {feishu_link}")
-            else:
-                self.log("INFO", "跳过飞书上传")
-            
-            # 清理临时文件
-            self._cleanup(result)
-            
-            # 完成
-            elapsed = (datetime.now() - start_time).total_seconds()
-            self.log("INFO", f"✅ 处理完成，耗时 {elapsed:.1f} 秒")
-            
-        except Exception as e:
-            self.log("ERROR", str(e))
-            result.errors.append(str(e))
-            raise
+        # Step 1: 平台识别
+        self.log("STEP", "步骤 1/3: 平台识别...")
+        platform, video_id = self.detect_platform(url)
+        result.platform = platform
+        result.video_id = video_id
+        self.log("INFO", f"平台: {platform}, ID: {video_id}")
         
-        return result
-    
-    def _upload_to_wiki(self, content: str, title: str) -> str:
-        """
-        上传笔记到飞书Wiki。
+        # Step 2: 下载
+        self.log("STEP", "步骤 2/3: 下载视频/获取字幕...")
+        handler_class = self.PLATFORM_HANDLERS.get(platform)
+        if not handler_class:
+            raise ValueError(f"不支持的平台: {platform}")
         
-        通过OpenClaw Agent内置飞书工具上传（不依赖openclaw_runtime模块）。
-        此方法仅负责准备数据，实际上传由Agent调用feishu_wiki_space_node和feishu_update_doc完成。
-        """
-        # 不再尝试import openclaw_runtime，而是返回笔记信息供Agent上传
-        self.log("WARN", "脚本环境无法直接调用飞书工具，请由Agent完成Wiki上传")
-        self.log("INFO", f"笔记文件: {self.output_dir}")
-        return None
-    
-    def _cleanup(self, result: ProcessResult):
-        """清理临时文件"""
+        handler = handler_class()
+        download_result = handler.process(url)
+        
+        result.title = download_result.title
+        result.audio_file = download_result.audio_file
+        result.subtitle_text = getattr(download_result, 'subtitle_text', None)
+        needs_transcription = getattr(download_result, 'needs_transcription', True)
+        
+        # Step 3: ASR转录
+        self.log("STEP", "步骤 3/3: ASR转录...")
+        if result.subtitle_text:
+            result.transcript = result.subtitle_text
+            self.log("INFO", "✓ 使用字幕文本，跳过ASR")
+        elif result.audio_file:
+            transcript = self.asr.transcribe(result.audio_file)
+            result.transcript = transcript
+            self.log("INFO", f"✓ 转录完成 ({len(transcript)} 字符)")
+        else:
+            raise ValueError("无法获取转录文本：没有音频文件也没有字幕")
+        
+        # 保存转录文件
+        transcript_file = self.output_dir / f"transcript_{video_id}.txt"
+        with open(transcript_file, 'w', encoding='utf-8') as f:
+            f.write(result.transcript)
+        result.transcript_file = str(transcript_file)
+        
+        # 清理音频
         if result.audio_file and Path(result.audio_file).exists():
             try:
                 Path(result.audio_file).unlink()
             except:
                 pass
         
-        if result.subtitle_file and Path(result.subtitle_file).exists():
-            try:
-                Path(result.subtitle_file).unlink()
-            except:
-                pass
+        elapsed = (datetime.now() - start_time).total_seconds()
+        self.log("INFO", f"✅ 转录完成，耗时 {elapsed:.1f} 秒")
+        
+        # 输出JSON供Agent解析
+        import json
+        output = {
+            "title": result.title,
+            "video_id": result.video_id,
+            "platform": result.platform,
+            "video_url": result.video_url,
+            "transcript_file": result.transcript_file,
+            "transcript_length": len(result.transcript)
+        }
+        print(json.dumps(output, ensure_ascii=False))
+        
+        return result
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Video Learner Wiki版 - 视频学习笔记生成器',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description='Video Learner - 视频转录器（笔记由Agent生成）',
         epilog="""
 示例:
   python video_learner_wiki.py "https://www.bilibili.com/video/BVxxxxx"
   python video_learner_wiki.py "https://www.youtube.com/watch?v=xxxxx"
-  python video_learner_wiki.py "https://v.douyin.com/xxxxx/"
-  python video_learner_wiki.py "url" --no-upload  # 不上传飞书
 
 环境变量:
-  GLM_API_KEY          - GLM API密钥 (必需)
-  ALIYUN_ASR_API_KEY   - 阿里云ASR API密钥 (必需)
-  FEISHU_SPACE_ID      - 飞书空间ID (必需)
-  FEISHU_PARENT_TOKEN  - 飞书Wiki父节点Token (必需)
+  GROQ_API_KEY          - Groq Whisper API密钥 (优先)
+  ALIYUN_ASR_API_KEY   - 阿里云ASR API密钥 (备选)
+  ASR_PROVIDER          - asr引擎: groq(默认) | aliyun
         """
     )
     parser.add_argument('url', help='视频链接')
-    parser.add_argument('--no-upload', action='store_true', help='不上传飞书')
-    parser.add_argument('--version', action='version', version='Video Learner Wiki 1.0')
     
     args = parser.parse_args()
     
     learner = VideoLearnerWiki()
-    
-    try:
-        result = learner.process(args.url, skip_upload=args.no_upload)
-        
-        print("\n" + "="*50)
-        print("[OK] Video processing completed")
-        print("="*50)
-        print(f"  Platform: {result.platform}")
-        print(f"  Title: {result.title}")
-        print(f"  Note: {result.note_file}")
-        if result.feishu_link:
-            print(f"  Wiki: {result.feishu_link}")
-        print("="*50)
-        
-    except Exception as e:
-        print(f"\n[ERROR] Processing failed: {e}", file=sys.stderr)
-        sys.exit(1)
+    learner.process(args.url)
 
 
 if __name__ == "__main__":

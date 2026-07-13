@@ -58,12 +58,14 @@ cd ~/.openclaw/workspace-video-learner
 python3 scripts/asr_aliyun.py "output/audio_xxx.wav" --output "output/transcript_xxx.txt"
 ```
 
-### 第四步：GLM 生成笔记
+### 第四步：Agent大模型生成笔记（不调用外部API）
 
-```bash
-cd ~/.openclaw/workspace-video-learner
-python3 scripts/note_generator.py "output/transcript_xxx.txt" --title "视频标题" --output "output/note_xxx.md"
-```
+**直接读取转录文本，用当前对话大模型生成结构化笔记：**
+1. 读取转录文件：`read output/transcript_xxx.txt`
+2. 根据笔记模板，直接生成笔记内容
+3. 将笔记+完整转录拼接为完整笔记文件，`write` 到 `output/note_xxx.md`
+
+笔记结构：核心主题 → 核心观点 → 典型案例 → 实践建议 → 核心金句
 
 ### 第五步：上传到飞书 Wiki（关键！）
 
@@ -83,10 +85,12 @@ python3 scripts/note_generator.py "output/transcript_xxx.txt" --title "视频标
 
 | 变量 | 用途 | 获取方式 |
 |------|------|----------|
-| `GLM_API_KEY` | 笔记生成 | open.bigmodel.cn |
-| `ALIYUN_ASR_API_KEY` | 语音转录 | 阿里云 NLS 控制台 |
+| `GROQ_API_KEY` | 语音转录（默认） | Groq Console |
+| `ALIYUN_ASR_API_KEY` | 语音转录（备用） | 阿里云 NLS 控制台 |
 | `FEISHU_SPACE_ID` | Wiki 空间 ID | 知识库空间设置 |
 | `FEISHU_PARENT_TOKEN` | Wiki 父节点 Token | 右键文件夹 > 复制 Node Token |
+
+> **注意**：不再需要 `GLM_API_KEY`，笔记由Agent大模型直接生成。
 
 ## 笔记结构
 
@@ -110,8 +114,7 @@ python3 scripts/note_generator.py "output/transcript_xxx.txt" --title "视频标
 | 问题 | 排查 |
 |------|------|
 | 下载失败 | 检查 cookies / 网络连接 |
-| ASR 失败 | 检查 ALIYUN_ASR_API_KEY |
-| 笔记生成失败 | 检查 GLM_API_KEY |
+| ASR 失败 | 检查 GROQ_API_KEY / ALIYUN_ASR_API_KEY |
 | Wiki 上传失败 | 检查 space_id / parent_token / 权限 |
 
 ## 工作原则

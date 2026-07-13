@@ -15,7 +15,37 @@ from pathlib import Path
 
 # 统一数据模型(与各平台 downloader 共用)
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from models import DownloadResult
+from models import DownloadResult, PostCaption
+
+
+def parse_f2_metadata(raw: dict) -> DownloadResult:
+    """从 f2 输出的视频 metadata JSON 解析文案 + 统计
+
+    字段名基于 f2 dy 模式常见输出(desc/text_extra/statistics/author/duration)。
+    真实字段以 f2 实测为准(见 Task 4b 环境探查),此处先建骨架。
+    """
+    desc = raw.get("desc") or ""
+    hashtags = [f"#{t['hashtag_name']}" for t in raw.get("text_extra", [])
+                if t.get("hashtag_name")]
+    caption = PostCaption.from_text(desc) if desc else PostCaption()
+    if hashtags and not caption.hashtags:
+        caption.hashtags = hashtags
+    caption.raw_text = desc
+    stats = raw.get("statistics", {})
+    author = raw.get("author", {})
+    duration_ms = raw.get("duration", 0)
+    return DownloadResult(
+        title=desc.split("\n")[0][:40] if desc else "抖音视频",
+        description=desc,
+        tags=[h.lstrip("#") for h in (hashtags or caption.hashtags)],
+        caption=caption,
+        duration_sec=int(duration_ms // 1000) if duration_ms else None,
+        view_count=stats.get("play_count"),
+        like_count=stats.get("digg_count"),
+        comment_count=stats.get("comment_count"),
+        creator=author.get("nickname"),
+        raw=raw,
+    )
 
 
 class DouyinDownloader:

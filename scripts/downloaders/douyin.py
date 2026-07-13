@@ -98,12 +98,37 @@ class DouyinDownloader:
         # 4. 从视频提取音频（用于 ASR 转录）
         audio_file = self._extract_audio(video_file, video_id)
         print(f"  [抖音] 音频已提取: {audio_file}")
-        
-        return DownloadResult(
-            title=title,
-            audio_file=audio_file,
-            needs_transcription=True
-        )
+
+        # 5. 解析 f2 输出的 metadata JSON → 文案+统计(Task 4b)
+        result = self._try_parse_f2_metadata(output_dir, fallback_title=title)
+        result.audio_file = audio_file
+        result.video_file = video_file
+        result.needs_transcription = True
+        if not result.title or result.title == "抖音视频":
+            result.title = title
+        return result
+
+    def _try_parse_f2_metadata(self, output_dir: str, fallback_title: str = "") -> DownloadResult:
+        """从 f2 输出目录找 metadata JSON 并解析。
+
+        f2 的 JSON 输出位置/字段名待真实环境校准(Task 4b Step 1 探查)。
+        此处假设: f2 在 output_dir 下输出 *.json, 含 desc 字段。
+        """
+        import json as _json
+        json_candidates = glob.glob(os.path.join(output_dir, "**", "*.json"), recursive=True)
+        for jp in json_candidates:
+            try:
+                raw = _json.load(open(jp, encoding="utf-8"))
+                if isinstance(raw, list):
+                    raw = next((x for x in raw if isinstance(x, dict) and x.get("desc")),
+                               raw[0] if raw else {})
+                if isinstance(raw, dict) and raw.get("desc"):
+                    print(f"  [抖音] 解析 f2 metadata: {jp}")
+                    return parse_f2_metadata(raw)
+            except Exception as e:
+                print(f"  [抖音] 解析 {jp} 失败(跳过): {e}")
+        print(f"  [抖音] 未找到含 desc 的 f2 metadata JSON, 文案字段为空(待 Task 4b 校准)")
+        return DownloadResult(title=fallback_title or "抖音视频")
     
     def _resolve_url(self, url: str) -> str:
         """将抖音短链接解析为完整 URL"""

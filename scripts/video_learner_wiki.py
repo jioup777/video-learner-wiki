@@ -27,6 +27,8 @@ from downloaders.bilibili import BilibiliDownloader
 from downloaders.youtube import YouTubeDownloader
 from downloaders.douyin import DouyinDownloader
 from asr_aliyun import AliyunASR
+from metadata import build_metadata
+from summarizer import summarize
 
 
 @dataclass
@@ -149,34 +151,72 @@ class VideoLearnerWiki:
         else:
             raise ValueError("无法获取转录文本：没有音频文件也没有字幕")
         
-        # 保存转录文件
-        transcript_file = self.output_dir / f"transcript_{video_id}.txt"
-        with open(transcript_file, 'w', encoding='utf-8') as f:
-            f.write(result.transcript)
-        result.transcript_file = str(transcript_file)
-        
-        # 清理音频
+        # ===== 组装标准化 artifact(7层 metadata + 5文件契约) =====
+        # topic 待 CC 端归类填, archived_by=openclaw(OpenClaw 产原料)
+        artifact_dir = self.workspace / "downloads" / video_id
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+
+        # transcript.txt
+        transcript_path = artifact_dir / "transcript.txt"
+        transcript_path.write_text(result.transcript or "", encoding="utf-8")
+        result.transcript_file = str(transcript_path)
+
+        # post_caption.txt(从 download_result.caption; 抖音需 Task 4b f2 探查后才有)
+        caption = getattr(download_result, "caption", None)
+        (artifact_dir / "post_caption.txt").write_text(
+            caption.raw_text if caption else "", encoding="utf-8")
+
+        # summary(fail-safe, 失败返回空串不阻塞)
+        summary = summarize(result.transcript or "", result.title)
+
+        # metadata.json
+        import json
+        metadata = build_metadata(
+            platform=result.platform, video_id=result.video_id, url=url,
+            title=result.title, creator=getattr(download_result, "creator", None),
+            duration_sec=getattr(download_result, "duration_sec", None),
+            description=getattr(download_result, "description", None),
+            tags=getattr(download_result, "tags", []) or [],
+            view_count=getattr(download_result, "view_count", None),
+            like_count=getattr(download_result, "like_count", None),
+            comment_count=getattr(download_result, "comment_count", None),
+            caption=caption,
+            transcript_source=("subtitle" if result.subtitle_text else type(self.asr).__name__.lower()),
+            transcript_text=result.transcript or "",
+            summary=summary,
+            topic=None, subtopic=[], topic_source="pending",  # CC 端归类填
+            archived_by="openclaw",
+            video_path=getattr(download_result, "video_file", "") or "",
+            audio_path=result.audio_file or "",
+            route=result.platform,
+            asr_backend=type(self.asr).__name__,
+            asr_status="ok",
+            transcript_path=str(transcript_path),
+            raw=getattr(download_result, "raw", {}) or {},
+        )
+        (artifact_dir / "metadata.json").write_text(
+            json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # 清理临时音频(artifact 只留 transcript/post_caption/metadata;
+        # video/audio 文件路径记录在 metadata.download, 文件本身按需保留)
         if result.audio_file and Path(result.audio_file).exists():
             try:
                 Path(result.audio_file).unlink()
-            except:
+            except Exception:
                 pass
-        
+
         elapsed = (datetime.now() - start_time).total_seconds()
-        self.log("INFO", f"✅ 转录完成，耗时 {elapsed:.1f} 秒")
-        
-        # 输出JSON供Agent解析
-        import json
+        self.log("INFO", f"✅ artifact 产出完成, 耗时 {elapsed:.1f} 秒: {artifact_dir}")
+
+        # 输出 JSON 供 CC 端 fetch_artifact.sh 解析 artifact_dir
         output = {
-            "title": result.title,
+            "artifact_dir": str(artifact_dir),
             "video_id": result.video_id,
             "platform": result.platform,
-            "video_url": result.video_url,
-            "transcript_file": result.transcript_file,
-            "transcript_length": len(result.transcript)
+            "title": result.title,
         }
         print(json.dumps(output, ensure_ascii=False))
-        
+
         return result
 
 
